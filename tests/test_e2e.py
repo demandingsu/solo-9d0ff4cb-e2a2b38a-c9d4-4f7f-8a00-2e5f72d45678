@@ -93,6 +93,48 @@ def test_project_003_failed_detail_forces_pending_without_deadline(client, stati
     assert any(s["role"] == "failed" for s in data["sources"])
 
 
+def test_project_004_reschedule_uses_current_time_and_ignores_old_date(client, static_server):
+    data = _collect(client, static_server, "GSB-2026-004")
+
+    assert data["status"] == "open"
+    assert data["can_bid"] is True
+    # “由 2026-11-12 09:00 调整为 2026-11-18 09:00” 必须取现行时间，旧时间不得回流
+    assert data["effective_deadline"].startswith("2026-11-18T09:00:00")
+
+    notices = data["notices"]
+    assert [n["kind"] for n in notices] == ["original", "correction", "correction"]
+    # 发布时间顺序：原公告 → 未改期澄清 → 延期更正
+    published = [n["published_at"] for n in notices]
+    assert published == sorted(published)
+    # 未改期更正只重述旧日期：deadline 为 None，不覆盖已生效期限
+    assert notices[1]["deadline"] is None
+    assert notices[1]["deadline_conflict"] is False
+    # 延期更正给出明确“旧→新”表述：只保留现行时间
+    assert notices[2]["deadline"].startswith("2026-11-18T09:00:00")
+    assert notices[2]["deadline_conflict"] is False
+
+    # 来源：列表页 + 原公告 + 两条更正，顺序与公告一致
+    roles = [s["role"] for s in data["sources"]]
+    assert roles[0] == "list"
+    assert roles[1:] == ["original", "correction", "correction"]
+
+
+def test_project_005_contradicting_deadlines_forces_pending(client, static_server):
+    data = _collect(client, static_server, "GSB-2026-005")
+
+    # 同一更正给出两个相互矛盾的现行截止时间：待核实且清空有效期限
+    assert data["status"] == "pending"
+    assert data["can_bid"] is False
+    assert data["effective_deadline"] is None
+
+    correction = next(n for n in data["notices"] if n["kind"] == "correction")
+    assert correction["deadline"] is None
+    assert correction["deadline_conflict"] is True
+    candidates = {c[:16] for c in correction["deadline_candidates"]}
+    assert candidates == {"2026-11-20T09:30", "2026-11-22T10:00"}
+    assert any("矛盾" in w for w in data["warnings"])
+
+
 def test_unknown_project_returns_not_found(client, static_server):
     data = _collect(client, static_server, "GSB-2099-NOPE")
     assert data["status"] == "not_found"

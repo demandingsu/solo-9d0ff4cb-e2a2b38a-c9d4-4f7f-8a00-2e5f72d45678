@@ -45,7 +45,15 @@ class NoticeRecord(BaseModel):
     title: str
     published_at: datetime | None = None
     deadline: datetime | None = Field(
-        None, description="该公告声明的投标截止时间；未提及则为 None，合并时沿用已生效时间"
+        None, description="该公告声明的现行投标截止时间；未提及或仅重述旧时间则为 None，合并时沿用已生效时间"
+    )
+    deadline_conflict: bool = Field(
+        False,
+        description="同一公告内出现相互矛盾的现行截止时间；为 true 时 deadline 强制为 null，需人工核实",
+    )
+    deadline_candidates: list[datetime] = Field(
+        default_factory=list,
+        description="冲突时页面给出的全部候选截止时间，仅用于人工核实，不参与自动取值",
     )
     cancelled: bool = False
     cancellation_reason: str | None = None

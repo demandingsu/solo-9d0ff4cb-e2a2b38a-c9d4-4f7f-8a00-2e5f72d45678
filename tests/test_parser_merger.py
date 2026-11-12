@@ -163,6 +163,98 @@ def test_deadline_fallback_ignores_qualification_history_dates():
 
 
 # --------------------------------------------------------------------------- #
+# 改期表述：只取现行时间、未改期重述不产生期限、同页矛盾 → 冲突
+# --------------------------------------------------------------------------- #
+def test_label_field_explicit_old_to_new_takes_only_new_time():
+    # 任务中的 bug 场景：标签字段写“由旧时间 调整为 新时间”，旧 API 取第一个日期
+    html = """
+    <html><head><title>测试项目更正公告</title></head><body>
+    <h1>测试项目更正公告</h1>
+    <ul>
+      <li data-field="project-code" data-value="GSB-2026-001"></li>
+      <li data-field="published-at" data-value="2026-11-08 09:30"></li>
+      <li data-field="deadline"
+          data-value="由 2026-11-12 09:00 调整为 2026-11-18 09:00">
+        投标截止时间：由 2026-11-12 09:00 调整为 2026-11-18 09:00
+      </li>
+    </ul>
+    </body></html>
+    """
+    d = parse_detail(html, "http://x/reschedule.html")
+    assert d.deadline == datetime(2026, 11, 18, 9, 0)  # 现行时间，而非旧的 11-12
+    assert d.deadline_conflict is False
+
+
+def test_body_reschedule_sentence_ignores_leading_old_time():
+    html = """
+    <html><head><title>测试项目更正公告</title></head><body>
+    <h1>测试项目更正公告</h1>
+    <p>项目编号：GSB-2026-001</p>
+    <p>发布时间：2026-11-08 09:30</p>
+    <p>因安排调整，原投标截止时间为 2026-11-10 09:30，现延期至 2026年11月15日 14时00分，开标时间同步顺延。</p>
+    </body></html>
+    """
+    d = parse_detail(html, "http://x/body-reschedule.html")
+    assert d.deadline == datetime(2026, 11, 15, 14, 0)
+    assert d.deadline_conflict is False
+
+
+def test_no_change_correction_restating_old_date_yields_no_deadline():
+    html = """
+    <html><head><title>测试项目更正公告</title></head><body>
+    <h1>测试项目更正公告</h1>
+    <p>项目编号：GSB-2026-004</p>
+    <p>发布时间：2026-11-05 14:00</p>
+    <p>本更正公告未调整投标截止时间，投标截止时间仍按原招标文件 2026-11-12 09:00 执行，其他内容保持不变。</p>
+    </body></html>
+    """
+    d = parse_detail(html, "http://x/no-change.html")
+    assert d.deadline is None  # 旧日期只是重述，不得覆盖已生效期限
+    assert d.deadline_conflict is False
+
+
+def test_contradicting_current_deadlines_on_same_page_flag_conflict():
+    html = """
+    <html><head><title>测试项目更正公告</title></head><body>
+    <h1>测试项目更正公告</h1>
+    <ul>
+      <li data-field="project-code" data-value="GSB-2026-005"></li>
+      <li data-field="published-at" data-value="2026-11-09 16:00"></li>
+      <li data-field="deadline" data-value="2026-11-20 09:30">投标截止时间：2026-11-20 09:30</li>
+    </ul>
+    <p>原投标截止时间为 2026-11-16 09:30，现延期至 2026年11月22日 10时00分，开标时间同步顺延。</p>
+    </body></html>
+    """
+    d = parse_detail(html, "http://x/conflict.html")
+    # 两个相互矛盾的“现行时间”：不按页面先后猜测，清空期限并标记冲突
+    assert d.deadline is None
+    assert d.deadline_conflict is True
+    assert set(d.deadline_candidates) == {
+        datetime(2026, 11, 20, 9, 30),
+        datetime(2026, 11, 22, 10, 0),
+    }
+    assert any("矛盾" in w for w in d.warnings)
+
+
+def test_two_identical_new_times_are_not_a_conflict():
+    # data-field 与正文给出相同的现行时间（不同写法），属于重复声明而非矛盾
+    html = """
+    <html><head><title>测试项目更正公告</title></head><body>
+    <h1>测试项目更正公告</h1>
+    <ul>
+      <li data-field="project-code" data-value="GSB-2026-001"></li>
+      <li data-field="published-at" data-value="2026-11-08 09:30"></li>
+      <li data-field="deadline" data-value="2026-11-18 09:00">投标截止时间：2026-11-18 09:00</li>
+    </ul>
+    <p>投标截止时间由 2026-11-12 09:00 调整为 2026年11月18日 09时00分。</p>
+    </body></html>
+    """
+    d = parse_detail(html, "http://x/same-twice.html")
+    assert d.deadline == datetime(2026, 11, 18, 9, 0)
+    assert d.deadline_conflict is False
+
+
+# --------------------------------------------------------------------------- #
 # 合并器
 # --------------------------------------------------------------------------- #
 def _notice(kind, published, deadline=None, cancelled=False, url=None, reason=None):
@@ -277,3 +369,48 @@ def test_merge_original_without_deadline_and_no_supplement_is_pending():
     )
     assert result.status == ProjectStatus.PENDING
     assert result.effective_deadline is None
+
+
+def test_merge_conflicting_notice_forces_pending_and_clears_deadline():
+    result = merge_notices(
+        MergeInput(
+            notices=[
+                _notice(NoticeKind.ORIGINAL, datetime(2026, 11, 3, 9), datetime(2026, 11, 16, 9, 30)),
+                NoticeRecord(
+                    url="http://x/conflict.html",
+                    kind=NoticeKind.CORRECTION,
+                    title="公告-correction",
+                    published_at=datetime(2026, 11, 9, 16),
+                    deadline=None,
+                    deadline_conflict=True,
+                    deadline_candidates=[
+                        datetime(2026, 11, 20, 9, 30),
+                        datetime(2026, 11, 22, 10, 0),
+                    ],
+                ),
+            ]
+        )
+    )
+    # 矛盾的现行截止时间：待核实、清空有效期限，不按页面先后猜一个
+    assert result.status == ProjectStatus.PENDING
+    assert result.can_bid is False
+    assert result.effective_deadline is None
+    assert any("矛盾" in w for w in result.warnings)
+    # 冲突公告的候选时间仍随明细返回，供人工核实
+    conflict_notice = next(n for n in result.ordered_notices if n.deadline_conflict)
+    assert len(conflict_notice.deadline_candidates) == 2
+
+
+def test_merge_no_change_then_reschedule_ends_with_current_time():
+    # 仅重述旧日期（deadline=None）的更正不影响已生效期限；明确改期的更正再覆盖
+    result = merge_notices(
+        MergeInput(
+            notices=[
+                _notice(NoticeKind.ORIGINAL, datetime(2026, 11, 2, 10), datetime(2026, 11, 12, 9, 0)),
+                _notice(NoticeKind.CORRECTION, datetime(2026, 11, 5, 14), None),
+                _notice(NoticeKind.CORRECTION, datetime(2026, 11, 8, 9, 30), datetime(2026, 11, 18, 9, 0)),
+            ]
+        )
+    )
+    assert result.status == ProjectStatus.OPEN
+    assert result.effective_deadline == datetime(2026, 11, 18, 9, 0)

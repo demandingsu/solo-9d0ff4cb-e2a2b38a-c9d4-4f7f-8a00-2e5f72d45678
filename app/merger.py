@@ -2,8 +2,10 @@
 
 规则（对应需求）：
 * 按发布时间从早到晚依次应用公告；
-* 更正公告未提及截止时间时，沿用此前已经生效的截止时间；
-* 更正公告给出新截止时间（如延期）时，以新时间覆盖；
+* 更正公告未提及截止时间（或仅重述旧时间并声明未改期）时，沿用此前已经生效的截止时间；
+* 更正公告给出明确“原时间→现时间”改期表述时，解析器只取现行时间，合并器以其覆盖；
+* 同一公告给出相互矛盾的现行截止时间 → 整体标记“待核实”并清空有效期限，
+  不按页面先后猜测；
 * 出现取消采购信息后，项目不可投标；
 * 任一关联详情页抓取/解析失败 → 整体标记“待核实”，且不返回任何截止时间，
   避免把旧时间当作最终期限；
@@ -70,6 +72,25 @@ def merge_notices(data: MergeInput) -> MergeResult:
             warnings=warnings,
         )
 
+    # 同一公告内出现相互矛盾的现行截止时间 → 待核实且清空有效期限，
+    # 绝不按页面先后猜测其中一个
+    conflicting = [n for n in ordered if n.deadline_conflict]
+    if conflicting:
+        for notice in conflicting:
+            candidates = "、".join(dt.strftime("%Y-%m-%d %H:%M") for dt in notice.deadline_candidates)
+            warnings.append(
+                f"公告存在相互矛盾的现行投标截止时间（{candidates or '候选时间缺失'}），"
+                f"需人工核实：{notice.url}"
+            )
+        return MergeResult(
+            status=ProjectStatus.PENDING,
+            can_bid=False,
+            effective_deadline=None,
+            cancelled=any(n.cancelled for n in ordered),
+            ordered_notices=ordered,
+            warnings=warnings,
+        )
+
     originals = [n for n in ordered if n.kind == NoticeKind.ORIGINAL]
     if not originals:
         warnings.append("未识别到原公告，仅有更正类公告，信息链不完整")
@@ -82,7 +103,8 @@ def merge_notices(data: MergeInput) -> MergeResult:
             warnings=warnings,
         )
 
-    # 逐条应用：截止时间仅在公告明确提及时更新，否则沿用已生效时间
+    # 逐条应用：解析器已保证 deadline 只承载现行时间——
+    # 明确改期取“现时间”覆盖旧期限；未改期的旧日期重述 deadline=None，自然沿用已生效时间
     current_deadline: datetime | None = None
     cancelled = False
     cancel_reason: str | None = None

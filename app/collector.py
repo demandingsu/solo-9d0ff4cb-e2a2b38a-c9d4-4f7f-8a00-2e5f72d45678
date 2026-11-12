@@ -115,11 +115,13 @@ async def collect(req: FetchRequest) -> FetchResponse:
                     title=data.title,
                     published_at=data.published_at,
                     deadline=data.deadline,
+                    deadline_conflict=data.deadline_conflict,
+                    deadline_candidates=data.deadline_candidates,
                     cancelled=data.cancelled,
                     cancellation_reason=data.cancellation_reason,
                 )
             )
-            # 缺发布时间在 merger 中按待核实处理。
+            # 缺发布时间、同页截止时间冲突等均在 merger 中按待核实处理。
 
     # 4) 业务合并
     merge_result = merge_notices(
